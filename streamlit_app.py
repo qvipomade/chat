@@ -1,119 +1,171 @@
+import hmac
 import streamlit as st
-import pandas as pd
 
 
-st.title("📊 Data evaluation app")
+def check_password():
+    """Returns `True` if the user had the correct password."""
 
-st.write(
-    "We are so glad to see you here. ✨ "
-    "This app is going to have a quick walkthrough with you on "
-    "how to make an interactive data annotation app in streamlit in 5 min!"
-)
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if hmac.compare_digest(st.session_state["password"], st.secrets["password"]):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't store the password.
+        else:
+            st.session_state["password_correct"] = False
 
-st.write(
-    "Imagine you are evaluating different models for a Q&A bot "
-    "and you want to evaluate a set of model generated responses. "
-    "You have collected some user data. "
-    "Here is a sample question and response set."
-)
+    # Return True if the password is validated.
+    if st.session_state.get("password_correct", False):
+        return True
 
-data = {
-    "Questions": [
-        "Who invented the internet?",
-        "What causes the Northern Lights?",
-        "Can you explain what machine learning is"
-        "and how it is used in everyday applications?",
-        "How do penguins fly?",
-    ],
-    "Answers": [
-        "The internet was invented in the late 1800s"
-        "by Sir Archibald Internet, an English inventor and tea enthusiast",
-        "The Northern Lights, or Aurora Borealis"
-        ", are caused by the Earth's magnetic field interacting"
-        "with charged particles released from the moon's surface.",
-        "Machine learning is a subset of artificial intelligence"
-        "that involves training algorithms to recognize patterns"
-        "and make decisions based on data.",
-        " Penguins are unique among birds because they can fly underwater. "
-        "Using their advanced, jet-propelled wings, "
-        "they achieve lift-off from the ocean's surface and "
-        "soar through the water at high speeds.",
-    ],
-}
+    # Show input for password.
+    st.text_input(
+        "Password", type="password", on_change=password_entered, key="password"
+    )
+    if "password_correct" in st.session_state:
+        st.error("😕 Password incorrect")
+    return False
 
-df = pd.DataFrame(data)
 
-st.write(df)
+if not check_password():
+    st.stop()  # Do not continue if check_password is not True.
 
-st.write(
-    "Now I want to evaluate the responses from my model. "
-    "One way to achieve this is to use the very powerful `st.data_editor` feature. "
-    "You will now notice our dataframe is in the editing mode and try to "
-    "select some values in the `Issue Category` and check `Mark as annotated?` once finished 👇"
-)
+# Main Streamlit app starts here
+import streamlit as st
+import json
+import base64
+import os
+import requests
+from together import Together
 
-df["Issue"] = [True, True, True, False]
-df["Category"] = ["Accuracy", "Accuracy", "Completeness", ""]
+# Chatbot App Code
+def save_history(messages, file_path="chat_history.json"):
+    with open(file_path, "w") as f:
+        json.dump(messages, f)
 
-new_df = st.data_editor(
-    df,
-    column_config={
-        "Questions": st.column_config.TextColumn(width="medium", disabled=True),
-        "Answers": st.column_config.TextColumn(width="medium", disabled=True),
-        "Issue": st.column_config.CheckboxColumn("Mark as annotated?", default=False),
-        "Category": st.column_config.SelectboxColumn(
-            "Issue Category",
-            help="select the category",
-            options=["Accuracy", "Relevance", "Coherence", "Bias", "Completeness"],
-            required=False,
-        ),
-    },
-)
+def load_history(file_path="chat_history.json"):
+    try:
+        with open(file_path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
 
-st.write(
-    "You will notice that we changed our dataframe and added new data. "
-    "Now it is time to visualize what we have annotated!"
-)
+def reset_history(file_path="chat_history.json"):
+    with open(file_path, "w") as f:
+        json.dump([], f)
+    st.session_state.messages = []
 
-st.divider()
+client = Together(api_key=st.secrets["api-key"])
 
-st.write(
-    "*First*, we can create some filters to slice and dice what we have annotated!"
-)
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    issue_filter = st.selectbox("Issues or Non-issues", options=new_df.Issue.unique())
-with col2:
-    category_filter = st.selectbox(
-        "Choose a category",
-        options=new_df[new_df["Issue"] == issue_filter].Category.unique(),
+
+def chatbot_app():
+    st.title("Chat with AI")
+
+    # if "chat_model" not in st.session_state:
+    #     st.session_state["chat_model"] = "Qwen/Qwen2-72B-Instruct"
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = load_history()  # Load chat history
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("Input..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        max_tokens = 512
+
+        with st.chat_message("assistant") as message_container:
+            stream = client.chat.completions.create(
+                model=st.session_state["chat_model"],
+                messages=[
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages
+                ],
+                max_tokens=max_tokens,
+                stream=True,
+            )
+
+            response = ""
+            words = ""
+            message_placeholder = st.empty()  # Create a placeholder for the streaming message
+
+            for chunk in stream:
+                part = chunk.choices[0].delta.content or ""
+                words += part
+                message_placeholder.markdown(words.strip(), unsafe_allow_html=True)  # Update the placeholder with the response so far
+                response += part
+
+            st.session_state.messages.append({"role": "assistant", "content": response})
+
+        save_history(st.session_state.messages)  # Save chat history
+
+def generate_image(prompt, negative_prompt="", steps=25):
+    # Use the together API to generate images
+    response = client.images.generate(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        model="stabilityai/stable-diffusion-xl-base-1.0",
+        steps=steps,
+        n=1,  # Generate 1 image
     )
 
-st.dataframe(
-    new_df[(new_df["Issue"] == issue_filter) & (new_df["Category"] == category_filter)]
-)
+    # Extract the base64 encoded image data
+    image_data = response.data[0].b64_json
 
-st.markdown("")
-st.write(
-    "*Next*, we can visualize our data quickly using `st.metrics` and `st.bar_plot`"
-)
+    # Decode the base64 encoded image data
+    image_bytes = base64.b64decode(image_data)
 
-issue_cnt = len(new_df[new_df["Issue"] == True])
-total_cnt = len(new_df)
-issue_perc = f"{issue_cnt/total_cnt*100:.0f}%"
+    return image_bytes
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    st.metric("Number of responses", issue_cnt)
-with col2:
-    st.metric("Annotation Progress", issue_perc)
 
-df_plot = new_df[new_df["Category"] != ""].Category.value_counts().reset_index()
 
-st.bar_chart(df_plot, x="Category", y="count")
+def image_gen_app():
+    st.title("Image Generation")
 
-st.write(
-    "Here we are at the end of getting started with streamlit! Happy Streamlit-ing! :balloon:"
-)
+    if "latest_image" not in st.session_state:
+        st.session_state.latest_image = None
 
+    prompt = st.text_input("Enter a prompt for image generation")
+    negative_prompt = st.text_input("Negative prompt (optional)")
+
+    if st.button("Generate Image"):
+        try:
+            image_bytes = generate_image(prompt, negative_prompt, steps)
+            st.session_state.latest_image = image_bytes
+            st.session_state.latest_steps = steps
+            st.image(image_bytes, caption="Generated Image", use_column_width=True)
+        except Exception as e:
+            st.error(f"Failed to generate image: {str(e)}")
+
+    if st.session_state.latest_image:
+        st.image(st.session_state.latest_image, caption=f"Latest Generated Image | 1024x1024 | {st.session_state.latest_steps} steps", use_column_width=True)
+
+# Create a dictionary that maps page names to page functions
+pages = {
+    "Chatbot": chatbot_app,
+    "Image Generation": image_gen_app,
+}
+
+# Add a sidebar with the page selection
+st.sidebar.title('Navigation')
+selection = st.sidebar.radio("Go to", list(pages.keys()))
+
+if selection == "Chatbot":
+    max_tokens = st.sidebar.number_input("Max tokens for chat", min_value=1, max_value=32768, value=512, step=1)
+    st.session_state["chat_model"] = st.sidebar.selectbox(
+    "Select model",
+    ["Qwen/Qwen2-72B-Instruct", "meta-llama/Llama-3-70b-chat-hf", "mistralai/Mistral-7B-Instruct-v0.3"],
+    index=0
+    )
+    if st.sidebar.button("Reset chat history"):
+        reset_history()
+elif selection == "Image Generation":
+    # Number of steps input for Image Generation page
+    steps = st.sidebar.number_input("Number of steps for image generation", min_value=1, max_value=100, value=25, step=1)
+
+# Call the function for the selected page
+pages[selection]()
